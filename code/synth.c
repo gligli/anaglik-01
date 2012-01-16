@@ -9,8 +9,8 @@
 #define sbi(x,y)   x|= _BV(y)
 
 #define FOSC 16000000 // Clock Speed
-//#define BAUD 31250
-#define BAUD 38400
+#define BAUD 31250
+//#define BAUD 38400
 #define MYUBRR (FOSC/16/BAUD-1)
 
 #define CPU_MHZ (FOSC/1000000)
@@ -781,18 +781,18 @@ void matrix_scan(void)
 // midi
 //*****************************************************************************
 
+#define MIDI_NOTE_OFFSET (4*12-3)
+
 void midi_event(struct midi_msg *msg)
 {
-  switch(msg->type) {
-  case MIDI_NOTE_ON:
-	note_event(msg->data[0],1);
-    break;
-  case MIDI_NOTE_OFF:
-	note_event(msg->data[0],0);
-    break;
-  case MIDI_PROGRAM_CHANGE:
-    break;
-  }
+	switch(msg->type) {
+		case MIDI_NOTE_ON:
+			note_event(MIDI_NOTE_OFFSET+msg->data[0],1);
+			break;
+		case MIDI_NOTE_OFF:
+			note_event(MIDI_NOTE_OFFSET+msg->data[0],0);
+			break;
+	}
 }
 
 //*****************************************************************************
@@ -811,7 +811,7 @@ int __attribute__((noreturn)) main(void)
 	
 	midi_buffer_init(&midi); 
 	midi.callback = midi_event;  // Set a callback
-//	midi.channel_mask = 0xff;    // Listen to channels 0 to 7
+	midi.channel_mask = 0xff;    // Listen to channels 0 to 7
   
 	sei(); // Enable the Global Interrupt Enable flag so that interrupts can be processed 	
 
