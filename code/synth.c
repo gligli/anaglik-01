@@ -642,7 +642,8 @@ int matrix_keystate(uint8_t key)
 
 void matrix_event(uint8_t key, int pressed)
 {
-    char s[30];
+/*
+	char s[30];
 	
 	int2hex(key,2,s);
 	uart_puts(s);
@@ -650,7 +651,7 @@ void matrix_event(uint8_t key, int pressed)
 		uart_puts(" pressed\r\n");
 	else
 		uart_puts(" released\r\n");
-
+*/
 
 	// System 5 wheel -> OSC1 octave
 	if (pressed && key>=0x31 && key<=0x35)
@@ -781,16 +782,16 @@ void matrix_scan(void)
 // midi
 //*****************************************************************************
 
-#define MIDI_NOTE_OFFSET (4*12-3)
+#define MIDI_NOTE_OFFSET (3*12)
 
 void midi_event(struct midi_msg *msg)
 {
 	switch(msg->type) {
 		case MIDI_NOTE_ON:
-			note_event(MIDI_NOTE_OFFSET+msg->data[0],1);
+			note_event(msg->data[0]-MIDI_NOTE_OFFSET,1);
 			break;
 		case MIDI_NOTE_OFF:
-			note_event(MIDI_NOTE_OFFSET+msg->data[0],0);
+			note_event(msg->data[0]-MIDI_NOTE_OFFSET,0);
 			break;
 	}
 }
