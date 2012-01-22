@@ -9,8 +9,8 @@
 #define sbi(x,y)   x|= _BV(y)
 
 #define FOSC 16000000 // Clock Speed
-#define BAUD 31250
-//#define BAUD 38400
+//#define BAUD 31250
+#define BAUD 38400
 #define MYUBRR (FOSC/16/BAUD-1)
 
 #define CPU_MHZ (FOSC/1000000)
@@ -38,6 +38,8 @@ uint8_t presIdTimer1[5]={1,2,3,4,5};
 uint8_t presIdTimer2[5]={1,2,4,6,7};
 
 struct midi_buffer midi; 
+
+int8_t lfo_value;
 
 //*****************************************************************************
 // utils
@@ -77,7 +79,7 @@ int32_t lerp(int32_t x,int32_t y,int32_t alpha,int32_t alpha_scale)
 }
 
 //*****************************************************************************
-// avr hw stuff
+// delay
 //*****************************************************************************
 
 /* Delay for the given number of microseconds.  Assumes a 8 or 16 MHz clock. */
@@ -142,6 +144,10 @@ static inline void mdelay(uint16_t ms) {
     }
     udelay(ms * 1000 - 3); // regain the lost 3us
 }
+
+//*****************************************************************************
+// uart
+//*****************************************************************************
 
 void uart_init(void)
 {
@@ -213,12 +219,14 @@ ISR(USART_RXC_vect)
 // adc
 //*****************************************************************************
 
-#define ADCCHAN_DETUNE 0
-#define ADCCHAN_MOD 1
+#define ADCCHAN_VIBRATO 0
+#define ADCCHAN_DETUNE 1
+#define ADCCHAN_LFO 2
 
 void adc_init(void)
 {
-	// 2 ana inputs: PA6/PA7
+	// 3 ana inputs: PA5...PA7
+	cbi(DDRA,PIN5);
 	cbi(DDRA,PIN6);
 	cbi(DDRA,PIN7);
 	// VCC ref
@@ -229,14 +237,14 @@ void adc_init(void)
     // enable
     sbi(ADCSRA,ADEN);
 	// freq=fosc/32
-	sbi(ADCSRA,ADPS2);
+	sbi(ADCSRA,ADPS1);
 	sbi(ADCSRA,ADPS0);
 }
 
 unsigned char adc_capture(const unsigned char channel)
 {
     // sel channel
-    ADMUX=(ADMUX & 0xe0) | (channel & 1) | 6;
+    ADMUX=(ADMUX & 0xe0) | (channel + 5);
     // mux is slow...
     udelay(10);
     // start capture
@@ -246,6 +254,10 @@ unsigned char adc_capture(const unsigned char channel)
     // read
     return ADCH;
 }
+
+//*****************************************************************************
+// eeprom
+//*****************************************************************************
 
 void eeprom_write(unsigned int uiAddress, unsigned char ucData)
 {
@@ -289,8 +301,14 @@ unsigned char eeprom_read(unsigned int uiAddress)
 #define NOTE_HIGHEST 119
 #define NOTE_NONE -1
 
+#define NOTE_DETUNE_SEMITONES 1
+#define NOTE_VIBRATO_SEMITONES 6
+
+int8_t osc_curnote[2]={NOTE_NONE,NOTE_NONE};
+
 int8_t osc2_detune=0;
-uint16_t osc2_locnt=0,osc2_hicnt=0,osc2_curcnt=0;
+uint8_t vibrato_strength=0;
+uint16_t osc2_locnt_det=0,osc2_hicnt_det=0,osc2_locnt_vib=0,osc2_hicnt_vib=0,osc2_curcnt=0;
 int8_t osc1_octave=1;
 int8_t osc2_octave_offset=0;
 
@@ -356,26 +374,74 @@ void note_cvDacSend(int16_t value,int osc)
 	cbi(PORTD,DACCLK);
 }
 
-int16_t note_computeDetune(void)
+void note_handleCvDac(uint16_t cnt,int osc)
 {
-	int16_t rv=osc2_curcnt;
+	int8_t note=osc_curnote[osc-1];
+	
+	if (note==NOTE_NONE) return;
+	
+	uint32_t abscnt=(uint32_t)cnt*prescalers[midiNotes[note].pres];
+	int32_t cv=(65500*506)/abscnt;
+
+	if (cv<0) cv=0;
+	if (cv>65535) cv=65535;
+
+	static int16_t cvs[2]={0,0};
+	
+	cvs[osc-1]=cv-32768;
+	
+	// need to send both CVs at once in that order for proper DAC operation
+	note_cvDacSend(cvs[1],2);
+	note_cvDacSend(cvs[0],1);
+}
+
+void note_handlePitchChanges(void)
+{
+	uint16_t v=osc2_curcnt;
+	int16_t	vibrato=(int16_t)lfo_value*vibrato_strength;
 	
 	if (osc2_detune>0)
 	{
-		rv=lerp(osc2_curcnt,osc2_hicnt,osc2_detune,127);
+		v=lerp(v,osc2_hicnt_det,osc2_detune,127);
 	}
 	else if (osc2_detune<0) 
 	{
-		rv=lerp(osc2_curcnt,osc2_locnt,-osc2_detune,127);
+		v=lerp(v,osc2_locnt_det,-osc2_detune,127);
 	}
 	
-	return rv;
+	if (vibrato>0)
+	{
+		v=lerp(v,osc2_locnt_vib,vibrato,32767);
+	}
+	else if (vibrato<0) 
+	{
+		v=lerp(v,osc2_hicnt_vib,-vibrato,32767);
+	}
+	
+	// wait counter restart to avoid audio glitches
+	while(TCNT1>100);
+	
+	OCR1A=v;
+
+	note_handleCvDac(v,2);
 }
 
-void note_getDetune(void)
+uint16_t note_computeCounter(int8_t note,uint8_t cur_prescaler)
+{
+	uint16_t cnt;
+	
+	cnt=(midiNotes[note].cnt1*midiNotes[note].cnt2-1);
+	
+	// convert to current note prescaler
+	cnt=(uint32_t)cnt*prescalers[midiNotes[note].pres]/prescalers[cur_prescaler];
+	
+	return cnt;
+}
+
+void note_getDetuneAndVibrato(void)
 {
 	osc2_detune=adc_capture(ADCCHAN_DETUNE)-128;
-	OCR1A=note_computeDetune();
+	vibrato_strength=adc_capture(ADCCHAN_VIBRATO);
 }
 
 void note_play(int8_t note,int osc)
@@ -397,13 +463,14 @@ void note_play(int8_t note,int osc)
 		
 	if (note<NOTE_LOWEST || note>NOTE_HIGHEST) return;
 	
+	osc_curnote[osc-1]=note;
+		
 	uint8_t cnt1=midiNotes[note].cnt1;
 	uint8_t cnt2=midiNotes[note].cnt2;
 	uint8_t pres=midiNotes[note].pres;
 	
-	uint32_t abscnt=(uint32_t)cnt1*cnt2*prescalers[pres];
-	int32_t cv=33160710/abscnt;
-
+	uint16_t cnt=cnt1*cnt2-1;
+		
 	if(osc==1)
 	{
 		TCCR2=(TCCR2&~7)|presIdTimer2[pres];
@@ -415,40 +482,28 @@ void note_play(int8_t note,int osc)
 	{
 		TCCR1B=(TCCR1B&~7)|presIdTimer1[pres];
 
-		uint16_t cnt=cnt1*cnt2-1;
-		
-		int lonote=note-1;					
-		int hinote=note+1;					
-		
-		osc2_locnt=cnt;
-		osc2_hicnt=cnt;
 		osc2_curcnt=cnt;
 		
-		if (lonote>=NOTE_LOWEST){
-			osc2_locnt=(midiNotes[lonote].cnt1*midiNotes[lonote].cnt2-1);
-			// convert to current note prescaler
-			osc2_locnt=(uint32_t)osc2_locnt*prescalers[midiNotes[lonote].pres]/prescalers[pres];
-		}
-		
-		if (hinote<=NOTE_HIGHEST){
-			osc2_hicnt=(midiNotes[hinote].cnt1*midiNotes[hinote].cnt2-1);
-			// convert to current note prescaler
-			osc2_hicnt=(uint32_t)osc2_hicnt*prescalers[midiNotes[hinote].pres]/prescalers[pres];
-		}
+		osc2_locnt_det=cnt;
+		osc2_hicnt_det=cnt;
+
+		if (note>=NOTE_LOWEST+NOTE_DETUNE_SEMITONES)
+			osc2_locnt_det=note_computeCounter(note-NOTE_DETUNE_SEMITONES,pres);
+		if (note<=NOTE_HIGHEST-NOTE_DETUNE_SEMITONES)
+			osc2_hicnt_det=note_computeCounter(note+NOTE_DETUNE_SEMITONES,pres);
 				
-		OCR1A=note_computeDetune();
+		osc2_locnt_vib=cnt;
+		osc2_hicnt_vib=cnt;
+
+		if (note>=NOTE_LOWEST+NOTE_VIBRATO_SEMITONES)
+			osc2_locnt_vib=note_computeCounter(note-NOTE_VIBRATO_SEMITONES,pres);
+		if (note<=NOTE_HIGHEST+NOTE_VIBRATO_SEMITONES)
+			osc2_hicnt_vib=note_computeCounter(note+NOTE_VIBRATO_SEMITONES,pres);
+		
+		note_handlePitchChanges();
 	}
-
-	if (cv<0) cv=0;
-	if (cv>65535) cv=65535;
-
-	static int16_t cvs[2];
 	
-	cvs[osc-1]=cv-32768;
-	
-	// need to send both CVs at once in that order for proper DAC operation
-	note_cvDacSend(cvs[1],2);
-	note_cvDacSend(cvs[0],1);
+	note_handleCvDac(cnt,osc);
 }
 
 int note_otherOsc(int osc)
@@ -622,7 +677,7 @@ ISR(INT2_vect)
 // keyboard + buttons matrix
 //*****************************************************************************
 
-#define MATRIX_NUM 10
+#define MATRIX_NUM 9
 #define MATRIX_KB_FIRST 1
 #define MATRIX_KB_LAST 0x28
 
@@ -800,6 +855,11 @@ void midi_event(struct midi_msg *msg)
 // main
 //*****************************************************************************
 
+void lfo_getValue(void)
+{
+	lfo_value=adc_capture(ADCCHAN_LFO)-128;
+}
+
 int __attribute__((noreturn)) main(void)
 {
     uart_init();
@@ -808,7 +868,7 @@ int __attribute__((noreturn)) main(void)
 	adc_init();
 	seq_init();
 
-    uart_puts("synth\r\n");
+    uart_puts("\r\nAnaglik-01 synth\r\n");
 	
 	midi_buffer_init(&midi); 
 	midi.callback = midi_event;  // Set a callback
@@ -816,8 +876,17 @@ int __attribute__((noreturn)) main(void)
   
 	sei(); // Enable the Global Interrupt Enable flag so that interrupts can be processed 	
 
+	uint8_t cnt=0;
+	
 	for(;;){
-		matrix_scan();
-		note_getDetune();
+		lfo_getValue();
+		note_handlePitchChanges();
+		
+		if(cnt&1)
+			matrix_scan();
+		else
+			note_getDetuneAndVibrato();
+		
+		++cnt;
 	}
 }
