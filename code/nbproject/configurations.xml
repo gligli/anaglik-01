@@ -2,6 +2,8 @@
 <configurationDescriptor version="79">
   <logicalFolder name="root" displayName="root" projectFiles="true" kind="ROOT">
     <df name="synth" root=".">
+      <in>Copy of synth.c</in>
+      <in>_synth.c</in>
       <in>nanomidi.c</in>
       <in>nanomidi.h</in>
       <in>synth.c</in>

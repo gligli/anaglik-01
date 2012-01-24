@@ -9,8 +9,8 @@
 #define sbi(x,y)   x|= _BV(y)
 
 #define FOSC 16000000 // Clock Speed
-//#define BAUD 31250
-#define BAUD 38400
+#define BAUD 31250
+//#define BAUD 38400
 #define MYUBRR (FOSC/16/BAUD-1)
 
 #define CPU_MHZ (FOSC/1000000)
@@ -259,6 +259,14 @@ unsigned char adc_capture(const unsigned char channel)
 // eeprom
 //*****************************************************************************
 
+#define EEPROM_SETTINGS_OSC2_OCT_OFF 0
+#define EEPROM_SETTINGS_DUO_MODE 1
+#define EEPROM_SETTINGS_DUO_CHORD_OFF 2
+#define EEPROM_SETTINGS_TRK_STR 3
+
+#define EEPROM_SEQ_COUNT_ADDR 768
+#define EEPROM_SEQ_NOTES_ADDR 769
+
 void eeprom_write(unsigned int uiAddress, unsigned char ucData)
 {
 	/* Wait for completion of previous write */
@@ -286,13 +294,20 @@ unsigned char eeprom_read(unsigned int uiAddress)
 	return EEDR;
 }
 
+void settings_store(void);
+void settings_load(void);
+
 //*****************************************************************************
 // note osc
 //*****************************************************************************
 
-#define DACCLK PORTD2
-#define DACDAT PORTD3
-#define DACWRD PORTD4
+#define CV_DAC_CLK PORTD2
+#define CV_DAC_DAT PORTD3
+#define CV_DAC_WRD PORTD4
+
+#define TRK_DAC_CLK PORTB1
+#define TRK_DAC_DAT PORTB4
+#define TRK_DAC_CS PORTA4
 
 #define OSC1OUT PORTB3
 #define OSC2OUT PORTD5
@@ -308,6 +323,7 @@ int8_t osc_curnote[2]={NOTE_NONE,NOTE_NONE};
 
 int8_t osc2_detune=0;
 uint8_t vibrato_strength=0;
+int8_t tracking_strength=0;
 uint16_t osc2_locnt_det=0,osc2_hicnt_det=0,osc2_locnt_vib=0,osc2_hicnt_vib=0,osc2_curcnt=0;
 int8_t osc1_octave=1;
 int8_t osc2_octave_offset=0;
@@ -320,16 +336,54 @@ void note_init(void)
 	cbi(DDRB,OSC1OUT);
 	cbi(DDRD,OSC2OUT);
 
-	DDRD|=0xDC; // DAC pins as output
+	DDRD|=0xDC; // cv DAC pins as output
 	TCCR1A=0x40; // toggle OC1A
 	TCCR1B=0x08; // CTC
 	
-	cbi(PORTD,DACWRD);
+	cbi(PORTD,CV_DAC_WRD);
 	
 	TCCR0=0x1e;
 	cbi(DDRB,PIN0);
 	
 	TCCR2=0x18;
+	
+	// tracking DAC
+	sbi(DDRB,TRK_DAC_CLK);
+	sbi(DDRB,TRK_DAC_DAT);
+	sbi(DDRA,TRK_DAC_CS);
+	
+	cbi(PORTB,TRK_DAC_CLK);
+	cbi(PORTB,TRK_DAC_DAT);
+	sbi(PORTA,TRK_DAC_CS);
+}
+
+void note_trackingDacSend(uint16_t value)
+{
+	int i;
+	
+	value&=0x0fff;
+	value|=0x7000; // write to dac / buffered / 1x / active
+	
+	cbi(PORTA,TRK_DAC_CS);
+	
+	for (i=0;i<16;++i)
+	{
+		cbi(PORTB,TRK_DAC_CLK);
+		
+		if (value&0x8000)
+			sbi(PORTB,TRK_DAC_DAT);
+		else
+			cbi(PORTB,TRK_DAC_DAT);
+
+		udelay(10);
+
+		sbi(PORTB,TRK_DAC_CLK);
+		udelay(10);
+		
+		value<<=1;
+	}
+
+	sbi(PORTA,TRK_DAC_CS);
 }
 
 void note_cvDacSend(int16_t value,int osc)
@@ -337,41 +391,41 @@ void note_cvDacSend(int16_t value,int osc)
 	int i;
 	
 	if(osc==1)
-		cbi(PORTD,DACWRD);
+		cbi(PORTD,CV_DAC_WRD);
 	else
-		sbi(PORTD,DACWRD);
+		sbi(PORTD,CV_DAC_WRD);
 	
 	for (i=0;i<16;++i)
 	{
-		cbi(PORTD,DACCLK);
+		cbi(PORTD,CV_DAC_CLK);
 		
 		if (value&0x8000)
-			sbi(PORTD,DACDAT);
+			sbi(PORTD,CV_DAC_DAT);
 		else
-			cbi(PORTD,DACDAT);
+			cbi(PORTD,CV_DAC_DAT);
 
 		udelay(10);
 
-		sbi(PORTD,DACCLK);
+		sbi(PORTD,CV_DAC_CLK);
 		udelay(10);
 		
 		value<<=1;
 	}
 	
 	if(osc==1)
-		sbi(PORTD,DACWRD);
+		sbi(PORTD,CV_DAC_WRD);
 	else
-		cbi(PORTD,DACWRD);
+		cbi(PORTD,CV_DAC_WRD);
 
 	for (i=0;i<5;++i)
 	{
-		cbi(PORTD,DACCLK);
+		cbi(PORTD,CV_DAC_CLK);
 		udelay(10);
-		sbi(PORTD,DACCLK);
+		sbi(PORTD,CV_DAC_CLK);
 		udelay(10);
 	}
 
-	cbi(PORTD,DACCLK);
+	cbi(PORTD,CV_DAC_CLK);
 }
 
 void note_handleCvDac(uint16_t cnt,int osc)
@@ -393,6 +447,11 @@ void note_handleCvDac(uint16_t cnt,int osc)
 	// need to send both CVs at once in that order for proper DAC operation
 	note_cvDacSend(cvs[1],2);
 	note_cvDacSend(cvs[0],1);
+}
+
+void note_handleTrackingDac(int8_t rawnote)
+{
+	note_trackingDacSend((uint16_t)(rawnote-9)*tracking_strength*7);
 }
 
 void note_handlePitchChanges(void)
@@ -522,7 +581,7 @@ void note_event(int8_t note, int pressed)
 		if (PIND&_BV(PIN6))
 		{
 			cbi(PORTD,PIN6);
-			udelay(1500);
+			udelay(2000);
 		}
 	
 		// next occupied and other free -> change next
@@ -531,6 +590,8 @@ void note_event(int8_t note, int pressed)
 			nextosc=note_otherOsc(nextosc);
 		}
 		
+		note_handleTrackingDac(note);
+
 		sbi(PORTD,PIN6);
 		
 		if(duo_mode)
@@ -582,9 +643,6 @@ void note_event(int8_t note, int pressed)
 // sequencer
 //*****************************************************************************
 
-#define SEQ_EEPROM_COUNT_ADDR 768
-#define SEQ_EEPROM_NOTES_ADDR 769
-
 #define SEQ_MAX_NOTES 255
 
 #define SEQ_STATE_STOP 0
@@ -607,7 +665,7 @@ void seq_init(void)
 
 void seq_updateCount(void)
 {
-	eeprom_write(SEQ_EEPROM_COUNT_ADDR,seq_step);
+	eeprom_write(EEPROM_SEQ_COUNT_ADDR,seq_step);
 }
 
 void seq_setState(int state)
@@ -621,7 +679,7 @@ void seq_setState(int state)
 	
 	if(state==SEQ_STATE_PLAY)
 	{
-		seq_count=eeprom_read(SEQ_EEPROM_COUNT_ADDR);
+		seq_count=eeprom_read(EEPROM_SEQ_COUNT_ADDR);
 	}
 
 	if(state==SEQ_STATE_STOP)
@@ -642,8 +700,9 @@ void seq_event(int8_t event) // any positive event is a note
 		seq_step=(seq_step)?seq_step-1:0;
 	else
 	{
-		eeprom_write(SEQ_EEPROM_NOTES_ADDR+seq_step,event);
+		eeprom_write(EEPROM_SEQ_NOTES_ADDR+seq_step,event);
 		++seq_step;
+		if (seq_step>SEQ_MAX_NOTES-1) seq_step=SEQ_MAX_NOTES-1;
 	}
 	
 	seq_updateCount();
@@ -657,8 +716,8 @@ ISR(INT2_vect)
 	if(seq_state!=SEQ_STATE_PLAY || !seq_count)
 		return;
 
-	event=eeprom_read(SEQ_EEPROM_NOTES_ADDR+seq_step);
-	if (seq_step) prev=eeprom_read(SEQ_EEPROM_NOTES_ADDR+seq_step-1);
+	event=eeprom_read(EEPROM_SEQ_NOTES_ADDR+seq_step);
+	if (seq_step) prev=eeprom_read(EEPROM_SEQ_NOTES_ADDR+seq_step-1);
    
 	if(event==SEQ_EVENT_SILENCE && prev>=0)
 	{
@@ -721,6 +780,8 @@ void matrix_event(uint8_t key, int pressed)
 		
 		duo_mode=0;
 		duo_chord_offset=0;
+
+		settings_store();
 	}
 
 	// 6 chord key -> duo mode
@@ -763,6 +824,8 @@ void matrix_event(uint8_t key, int pressed)
 			note_play(NOTE_NONE,1);
 			note_play(NOTE_NONE,2);
 		}
+		
+		settings_store();
 	}
 		
 	// Keyboard
@@ -801,6 +864,24 @@ void matrix_event(uint8_t key, int pressed)
 	if (pressed && key==0x38)
 	{
 		seq_event(SEQ_EVENT_TIE);
+	}
+	
+	// 1 key
+	if (pressed && key==0x3a)
+	{
+		tracking_strength--;
+		if (tracking_strength<0) tracking_strength=0;
+		
+		settings_store();
+	}
+
+	// 2 key
+	if (pressed && key==0x3b)
+	{
+		tracking_strength++;
+		if (tracking_strength>15) tracking_strength=15;
+		
+		settings_store();
 	}
 }
 
@@ -860,6 +941,23 @@ void lfo_getValue(void)
 	lfo_value=adc_capture(ADCCHAN_LFO)-128;
 }
 
+void settings_store(void)
+{
+	eeprom_write(EEPROM_SETTINGS_OSC2_OCT_OFF,(unsigned char)osc2_octave_offset);
+	eeprom_write(EEPROM_SETTINGS_DUO_MODE,(unsigned char)duo_mode);
+	eeprom_write(EEPROM_SETTINGS_DUO_CHORD_OFF,(unsigned char)duo_chord_offset);
+	eeprom_write(EEPROM_SETTINGS_TRK_STR,(unsigned char)tracking_strength);
+}
+
+void settings_load(void)
+{
+	osc2_octave_offset=(int8_t)eeprom_read(EEPROM_SETTINGS_OSC2_OCT_OFF);
+	duo_mode=(int)eeprom_read(EEPROM_SETTINGS_DUO_MODE);
+	duo_chord_offset=(int8_t)eeprom_read(EEPROM_SETTINGS_DUO_CHORD_OFF);
+	tracking_strength=(int8_t)eeprom_read(EEPROM_SETTINGS_TRK_STR);
+}
+
+
 int __attribute__((noreturn)) main(void)
 {
     uart_init();
@@ -874,6 +972,8 @@ int __attribute__((noreturn)) main(void)
 	midi.callback = midi_event;  // Set a callback
 	midi.channel_mask = 0xff;    // Listen to channels 0 to 7
   
+	settings_load();
+	
 	sei(); // Enable the Global Interrupt Enable flag so that interrupts can be processed 	
 
 	uint8_t cnt=0;
